@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discord-voice-tracker-bot"
+version = "0.1.0"
+description = "Discord bot that tracks daily voice time and posts midnight reports"
+requires-python = ">=3.11"
+dependencies = [
+  "discord.py>=2.4.0,<3.0.0",
+  "python-dotenv>=1.0.1,<2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0,<9.0.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
