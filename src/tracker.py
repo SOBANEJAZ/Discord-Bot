@@ -16,6 +16,7 @@ def split_interval_by_local_day(
     end_utc: datetime,
     tz: ZoneInfo,
 ) -> list[tuple[str, int]]:
+    """Split a UTC interval into (local_day_iso, seconds) buckets."""
     if start_utc.tzinfo is None or end_utc.tzinfo is None:
         raise ValueError("start_utc and end_utc must be timezone-aware")
 
@@ -29,6 +30,7 @@ def split_interval_by_local_day(
     cursor = start
 
     while cursor < end:
+        # Convert the cursor into local time so midnight boundaries match the configured timezone.
         local_cursor = cursor.astimezone(tz)
         local_day = local_cursor.date()
         next_midnight_local = datetime.combine(local_day + timedelta(days=1), time.min, tzinfo=tz)
@@ -52,6 +54,7 @@ class VoiceTracker:
         self.logger = logger or logging.getLogger(__name__)
 
     def start_session(self, user_id: str, started_at_utc: datetime | None = None) -> bool:
+        # A user can only have one open session in the tracked voice channel.
         if self.db.get_open_session(user_id) is not None:
             self.logger.debug("Ignoring duplicate start for user %s", user_id)
             return False
@@ -72,6 +75,7 @@ class VoiceTracker:
         return tracked
 
     def accumulate_interval(self, user_id: str, start_utc: datetime, end_utc: datetime) -> int:
+        # Persist each per-day chunk so cross-midnight sessions are attributed correctly.
         total_seconds = 0
         for day_key, seconds in split_interval_by_local_day(start_utc, end_utc, self.tz):
             self.db.add_daily_seconds(day_key, user_id, seconds)
@@ -79,6 +83,7 @@ class VoiceTracker:
         return total_seconds
 
     def rollover_open_sessions(self, midnight_utc: datetime) -> None:
+        # At local midnight, close yesterday's portion and reopen at exactly midnight.
         for session in self.db.list_open_sessions():
             if session.started_at_utc >= midnight_utc:
                 continue
@@ -86,6 +91,7 @@ class VoiceTracker:
             self.db.set_open_session(session.user_id, midnight_utc)
 
     def reseed_sessions(self, user_ids: list[str], started_at_utc: datetime | None = None) -> None:
+        # On startup we intentionally reset open sessions to "now" to avoid counting downtime.
         started = started_at_utc or utc_now()
         self.db.clear_open_sessions()
         for user_id in user_ids:
@@ -105,6 +111,7 @@ class VoiceTracker:
 
         now = now_utc or utc_now()
         for session in self.db.list_open_sessions():
+            # Include in-flight time for commands like /today without ending active sessions.
             for segment_day, seconds in split_interval_by_local_day(session.started_at_utc, now, self.tz):
                 if segment_day != day_local:
                     continue

@@ -4,11 +4,13 @@ from datetime import datetime, timezone
 
 
 def parse_iso_utc(value: str | None) -> datetime | None:
+    """Parse an ISO timestamp and normalize to UTC."""
     if not value:
         return None
 
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
+        # Stored values should be timezone-aware; treat naive values as UTC for resilience.
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
@@ -18,6 +20,7 @@ def remaining_cooldown_seconds(
     cooldown_seconds: int,
     now_utc: datetime,
 ) -> int:
+    """Return remaining global cooldown seconds for /report-now."""
     if cooldown_seconds <= 0:
         return 0
 

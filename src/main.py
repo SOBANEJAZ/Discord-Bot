@@ -35,12 +35,14 @@ class VoiceTrackerBot(commands.Bot):
 
         self.logger = logging.getLogger("voice-tracker-bot")
 
+        # runtime_ready prevents event handlers from running before channel/permission checks pass.
         self.runtime_ready = False
         self.guild_obj: discord.Guild | None = None
         self.tracked_voice_channel: discord.VoiceChannel | None = None
         self.report_channel: discord.TextChannel | None = None
 
     async def setup_hook(self) -> None:
+        # Register slash commands during startup and begin the midnight scheduler loop.
         register_commands(self)
         await self.tree.sync(guild=discord.Object(id=self.config.guild_id))
         self.midnight_report_loop.start()
@@ -55,6 +57,7 @@ class VoiceTrackerBot(commands.Bot):
             self.logger.info("Runtime checks passed")
 
     async def _validate_runtime_resources(self) -> bool:
+        # Fail fast if guild/channels/permissions are misconfigured.
         guild = self.get_guild(self.config.guild_id)
         if guild is None:
             self.logger.error("Configured guild %s not found", self.config.guild_id)
@@ -100,6 +103,7 @@ class VoiceTrackerBot(commands.Bot):
             return
 
         now = utc_now()
+        # Ignore bot accounts so only human members appear in tracked totals.
         active_users = [str(member.id) for member in self.tracked_voice_channel.members if not member.bot]
         self.tracker.reseed_sessions(active_users, started_at_utc=now)
         self.logger.info("Reseeded open sessions for %d active users", len(active_users))
@@ -126,11 +130,13 @@ class VoiceTrackerBot(commands.Bot):
         now = utc_now()
         user_id = str(member.id)
 
+        # Enter tracked channel => open a session.
         if before_id != tracked_channel_id and after_id == tracked_channel_id:
             if self.tracker.start_session(user_id, started_at_utc=now):
                 self.logger.info("Session started: user=%s", user_id)
             return
 
+        # Leave tracked channel => close and persist the session.
         if before_id == tracked_channel_id and after_id != tracked_channel_id:
             tracked_seconds = self.tracker.end_session(user_id, ended_at_utc=now)
             self.logger.info("Session ended: user=%s tracked=%ss", user_id, tracked_seconds)
@@ -143,10 +149,12 @@ class VoiceTrackerBot(commands.Bot):
         now = utc_now()
         now_local = now.astimezone(self.config.timezone)
 
+        # The loop runs every 30s; only execute report logic during 00:00 local minute.
         if now_local.hour != 0 or now_local.minute != 0:
             return
 
         target_day = (now_local.date() - timedelta(days=1)).isoformat()
+        # Guard against duplicate posts during the same 00:00 minute window.
         if self.db.get_meta(AUTO_REPORT_META_KEY) == target_day:
             return
 
@@ -157,6 +165,7 @@ class VoiceTrackerBot(commands.Bot):
         midnight_local = datetime.combine(now_local.date(), time.min, tzinfo=self.config.timezone)
         midnight_utc = midnight_local.astimezone(timezone.utc)
 
+        # Close yesterday's slice for users still connected at midnight.
         self.tracker.rollover_open_sessions(midnight_utc)
 
         tracked_name = str(self.config.tracked_voice_channel_id)
@@ -194,6 +203,7 @@ class VoiceTrackerBot(commands.Bot):
         )
 
     def record_manual_report(self, now_utc: datetime | None = None) -> None:
+        # Persist global cooldown reference timestamp for /report-now.
         now = (now_utc or utc_now()).astimezone(timezone.utc)
         self.db.set_meta(MANUAL_REPORT_META_KEY, now.isoformat())
 

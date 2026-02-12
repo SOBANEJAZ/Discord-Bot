@@ -13,10 +13,12 @@ if TYPE_CHECKING:
 
 
 def register_commands(bot: "VoiceTrackerBot") -> None:
+    # Commands are scoped to one guild to keep sync fast and behavior explicit.
     guild_scope = discord.Object(id=bot.config.guild_id)
 
     @bot.tree.command(name="status", description="Show bot status and cooldown info", guild=guild_scope)
     async def status(interaction: discord.Interaction) -> None:
+        # Status is ephemeral to avoid cluttering channels with operational details.
         now = utc_now()
         now_local = now.astimezone(bot.config.timezone)
         next_midnight_local = datetime.combine(now_local.date() + timedelta(days=1), time.min, tzinfo=bot.config.timezone)
@@ -42,6 +44,7 @@ def register_commands(bot: "VoiceTrackerBot") -> None:
 
         now = utc_now()
         day_local = now.astimezone(bot.config.timezone).date().isoformat()
+        # include_live=True adds in-progress session seconds on top of persisted totals.
         rows = bot.reporter.build_rows_for_day(
             interaction.guild,
             day_local,
@@ -67,6 +70,7 @@ def register_commands(bot: "VoiceTrackerBot") -> None:
             return
 
         now = utc_now()
+        # Cooldown is global for the guild, not per-user.
         cooldown_remaining = bot.cooldown_remaining_seconds(now)
         if cooldown_remaining > 0:
             await interaction.response.send_message(
@@ -91,6 +95,7 @@ def register_commands(bot: "VoiceTrackerBot") -> None:
                 bot.report_channel,
                 tracked_name,
                 day_local,
+                # Manual reports show day-so-far numbers.
                 include_live=True,
                 now_utc=now,
             )

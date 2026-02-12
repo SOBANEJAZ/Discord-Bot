@@ -13,6 +13,7 @@ except ModuleNotFoundError:  # pragma: no cover - allows tests without discord.p
 
 
 def format_seconds(total_seconds: int) -> str:
+    """Render a duration as HH:MM:SS for consistent report output."""
     safe_seconds = max(0, int(total_seconds))
     hours, remainder = divmod(safe_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -39,6 +40,7 @@ class Reporter:
         include_live: bool,
         now_utc: datetime | None = None,
     ) -> list[ReportRow]:
+        # Pull pre-aggregated totals (and optional live deltas), then map IDs to display names.
         totals = self.tracker.get_totals_for_day(day_local, include_live=include_live, now_utc=now_utc)
 
         rows: list[ReportRow] = []
@@ -47,6 +49,7 @@ class Reporter:
                 continue
 
             member = guild.get_member(int(user_id))
+            # Fall back to the raw ID when a member is no longer present in guild cache.
             display_name = member.display_name if member else f"User {user_id}"
             rows.append(ReportRow(user_id=user_id, display_name=display_name, seconds=seconds))
 
@@ -79,6 +82,7 @@ class Reporter:
 
         kwargs = {}
         if discord is not None:
+            # Never ping users in automated summaries.
             kwargs["allowed_mentions"] = discord.AllowedMentions.none()
 
         await report_channel.send(content, **kwargs)

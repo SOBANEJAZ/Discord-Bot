@@ -8,6 +8,8 @@ from .models import DailyTotal, OpenSession
 
 
 class Database:
+    """Thin SQLite access layer for tracker state and aggregates."""
+
     def __init__(self, db_path: str | Path) -> None:
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
@@ -20,6 +22,9 @@ class Database:
         self._closed = True
 
     def initialize(self) -> None:
+        # open_sessions: currently connected users in the tracked channel.
+        # daily_totals: aggregated seconds per local day and user.
+        # meta: small key/value store for scheduler and cooldown markers.
         self._conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS open_sessions (
@@ -82,6 +87,7 @@ class Database:
         ]
 
     def add_daily_seconds(self, day_local: str, user_id: str, seconds: int) -> None:
+        # Ignore empty or negative spans so callers can pass raw calculations safely.
         if seconds <= 0:
             return
 
@@ -132,6 +138,7 @@ class Database:
 
 
 def _to_utc(value: datetime) -> datetime:
+    """Normalize a timezone-aware datetime to UTC for storage."""
     if value.tzinfo is None:
         raise ValueError("Datetime must be timezone-aware")
     return value.astimezone(timezone.utc)

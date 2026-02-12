@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 @dataclass(frozen=True, slots=True)
 class Config:
+    """Runtime settings loaded from environment variables."""
+
     discord_token: str
     guild_id: int
     tracked_voice_channel_id: int
@@ -16,6 +18,7 @@ class Config:
 
 
 def _required_env(name: str) -> str:
+    """Read and trim a required environment variable."""
     value = os.getenv(name)
     if not value:
         raise ValueError(f"Missing required environment variable: {name}")
@@ -23,6 +26,7 @@ def _required_env(name: str) -> str:
 
 
 def _required_int_env(name: str) -> int:
+    """Parse a required positive integer environment variable."""
     value = _required_env(name)
     try:
         parsed = int(value)
@@ -35,6 +39,7 @@ def _required_int_env(name: str) -> int:
 
 
 def _timezone_from_env(name: str) -> ZoneInfo:
+    """Parse an IANA timezone name into a ZoneInfo instance."""
     tz_name = _required_env(name)
     try:
         return ZoneInfo(tz_name)
@@ -43,6 +48,7 @@ def _timezone_from_env(name: str) -> ZoneInfo:
 
 
 def load_config() -> Config:
+    """Load and validate all bot configuration from environment."""
     cooldown_raw = os.getenv("REPORT_NOW_COOLDOWN_SECONDS", "3600").strip()
     try:
         cooldown = int(cooldown_raw)
