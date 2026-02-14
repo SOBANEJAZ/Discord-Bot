@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 from datetime import datetime, timezone
 
 
-def parse_iso_utc(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp and normalize to UTC."""
+def parse_iso_utc(value):
+    """Parse an ISO timestamp and normalize to UTC. Returns None if value is empty."""
     if not value:
         return None
 
@@ -15,11 +13,7 @@ def parse_iso_utc(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def remaining_cooldown_seconds(
-    last_run_iso_utc: str | None,
-    cooldown_seconds: int,
-    now_utc: datetime,
-) -> int:
+def remaining_cooldown_seconds(last_run_iso_utc, cooldown_seconds, now_utc):
     """Return remaining global cooldown seconds for /report-now."""
     if cooldown_seconds <= 0:
         return 0

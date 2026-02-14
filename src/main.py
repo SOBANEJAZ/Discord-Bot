@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -8,229 +6,231 @@ import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+from . import db, reporter, tracker
 from .commands import register_commands
-from .config import Config, load_config
+from .config import load_config
 from .cooldown import remaining_cooldown_seconds
-from .db import Database
-from .reporter import Reporter
-from .tracker import VoiceTracker, utc_now
+from .tracker import utc_now
 
 AUTO_REPORT_META_KEY = "last_auto_report_day"
 MANUAL_REPORT_META_KEY = "last_manual_report_at_utc"
 DEFAULT_DB_PATH = Path("voice_tracker.db")
 
 
-class VoiceTrackerBot(commands.Bot):
-    def __init__(self, config: Config, db: Database) -> None:
-        intents = discord.Intents.none()
-        intents.guilds = True
-        intents.voice_states = True
+def create_bot(config):
+    """Create and configure the Discord bot with all event handlers.
 
-        super().__init__(command_prefix="!", intents=intents)
+    This is the main setup function — it wires together the config, database,
+    tracker, and reporter into a single bot instance.
+    """
+    intents = discord.Intents.none()
+    intents.guilds = True
+    intents.voice_states = True
 
-        self.config = config
-        self.db = db
-        self.tracker = VoiceTracker(db=db, tz=config.timezone)
-        self.reporter = Reporter(self.tracker)
+    bot = commands.Bot(command_prefix="!", intents=intents)
 
-        self.logger = logging.getLogger("voice-tracker-bot")
+    # Attach config and runtime state directly on the bot object.
+    bot.config = config
+    bot.logger = logging.getLogger("voice-tracker-bot")
+    bot.runtime_ready = False
+    bot.guild_obj = None
+    bot.tracked_voice_channel = None
+    bot.report_channel = None
 
-        # runtime_ready prevents event handlers from running before channel/permission checks pass.
-        self.runtime_ready = False
-        self.guild_obj: discord.Guild | None = None
-        self.tracked_voice_channel: discord.VoiceChannel | None = None
-        self.report_channel: discord.TextChannel | None = None
+    # --- Event Handlers ---
 
-    async def setup_hook(self) -> None:
-        # Register slash commands during startup and begin the midnight scheduler loop.
-        register_commands(self)
-        await self.tree.sync(guild=discord.Object(id=self.config.guild_id))
-        self.midnight_report_loop.start()
+    @bot.event
+    async def setup_hook():
+        """Called automatically by discord.py during startup."""
+        register_commands(bot)
+        await bot.tree.sync(guild=discord.Object(id=config["guild_id"]))
+        midnight_report_loop.start()
 
-    async def on_ready(self) -> None:
-        self.logger.info("Connected as %s (%s)", self.user, self.user.id if self.user else "unknown")
-        if self.runtime_ready:
+    @bot.event
+    async def on_ready():
+        bot.logger.info("Connected as %s (%s)", bot.user, bot.user.id if bot.user else "unknown")
+        if bot.runtime_ready:
             return
 
-        if await self._validate_runtime_resources():
-            self.runtime_ready = True
-            self.logger.info("Runtime checks passed")
+        if await validate_runtime(bot, config):
+            bot.runtime_ready = True
+            bot.logger.info("Runtime checks passed")
 
-    async def _validate_runtime_resources(self) -> bool:
-        # Fail fast if guild/channels/permissions are misconfigured.
-        guild = self.get_guild(self.config.guild_id)
-        if guild is None:
-            self.logger.error("Configured guild %s not found", self.config.guild_id)
-            await self.close()
-            return False
-
-        tracked = guild.get_channel(self.config.tracked_voice_channel_id)
-        if not isinstance(tracked, discord.VoiceChannel):
-            self.logger.error("Tracked channel %s is missing or not a voice channel", self.config.tracked_voice_channel_id)
-            await self.close()
-            return False
-
-        report = guild.get_channel(self.config.report_channel_id)
-        if not isinstance(report, discord.TextChannel):
-            self.logger.error("Report channel %s is missing or not a text channel", self.config.report_channel_id)
-            await self.close()
-            return False
-
-        me = guild.me
-        if me is None and self.user is not None:
-            me = guild.get_member(self.user.id)
-
-        if me is None:
-            self.logger.error("Unable to resolve bot member in guild %s", guild.id)
-            await self.close()
-            return False
-
-        perms = report.permissions_for(me)
-        if not perms.view_channel or not perms.send_messages:
-            self.logger.error("Missing view/send permission in report channel %s", report.id)
-            await self.close()
-            return False
-
-        self.guild_obj = guild
-        self.tracked_voice_channel = tracked
-        self.report_channel = report
-
-        self._reseed_open_sessions_from_channel()
-        return True
-
-    def _reseed_open_sessions_from_channel(self) -> None:
-        if self.tracked_voice_channel is None:
+    @bot.event
+    async def on_voice_state_update(member, before, after):
+        if not bot.runtime_ready:
             return
-
-        now = utc_now()
-        # Ignore bot accounts so only human members appear in tracked totals.
-        active_users = [str(member.id) for member in self.tracked_voice_channel.members if not member.bot]
-        self.tracker.reseed_sessions(active_users, started_at_utc=now)
-        self.logger.info("Reseeded open sessions for %d active users", len(active_users))
-
-    async def on_voice_state_update(
-        self,
-        member: discord.Member,
-        before: discord.VoiceState,
-        after: discord.VoiceState,
-    ) -> None:
-        if not self.runtime_ready:
-            return
-
         if member.bot:
             return
-
-        if member.guild.id != self.config.guild_id:
+        if member.guild.id != config["guild_id"]:
             return
 
-        tracked_channel_id = self.config.tracked_voice_channel_id
+        tracked_channel_id = config["tracked_voice_channel_id"]
         before_id = before.channel.id if before.channel else None
         after_id = after.channel.id if after.channel else None
 
         now = utc_now()
         user_id = str(member.id)
+        tz = config["timezone"]
 
         # Enter tracked channel => open a session.
         if before_id != tracked_channel_id and after_id == tracked_channel_id:
-            if self.tracker.start_session(user_id, started_at_utc=now):
-                self.logger.info("Session started: user=%s", user_id)
+            if tracker.start_session(user_id, tz, started_at_utc=now):
+                bot.logger.info("Session started: user=%s", user_id)
             return
 
         # Leave tracked channel => close and persist the session.
         if before_id == tracked_channel_id and after_id != tracked_channel_id:
-            tracked_seconds = self.tracker.end_session(user_id, ended_at_utc=now)
-            self.logger.info("Session ended: user=%s tracked=%ss", user_id, tracked_seconds)
+            tracked_seconds = tracker.end_session(user_id, tz, ended_at_utc=now)
+            bot.logger.info("Session ended: user=%s tracked=%ss", user_id, tracked_seconds)
+
+    # --- Midnight Report Loop ---
 
     @tasks.loop(seconds=30)
-    async def midnight_report_loop(self) -> None:
-        if not self.runtime_ready:
+    async def midnight_report_loop():
+        if not bot.runtime_ready:
             return
 
         now = utc_now()
-        now_local = now.astimezone(self.config.timezone)
+        tz = config["timezone"]
+        now_local = now.astimezone(tz)
 
-        # The loop runs every 30s; only execute report logic during 00:00 local minute.
+        # Only execute report logic during 00:00 local minute.
         if now_local.hour != 0 or now_local.minute != 0:
             return
 
         target_day = (now_local.date() - timedelta(days=1)).isoformat()
         # Guard against duplicate posts during the same 00:00 minute window.
-        if self.db.get_meta(AUTO_REPORT_META_KEY) == target_day:
+        if db.get_meta(AUTO_REPORT_META_KEY) == target_day:
             return
 
-        if self.guild_obj is None or self.report_channel is None:
-            self.logger.error("Runtime resources unavailable while trying to post midnight report")
+        if bot.guild_obj is None or bot.report_channel is None:
+            bot.logger.error("Runtime resources unavailable while trying to post midnight report")
             return
 
-        midnight_local = datetime.combine(now_local.date(), time.min, tzinfo=self.config.timezone)
+        midnight_local = datetime.combine(now_local.date(), time.min, tzinfo=tz)
         midnight_utc = midnight_local.astimezone(timezone.utc)
 
         # Close yesterday's slice for users still connected at midnight.
-        self.tracker.rollover_open_sessions(midnight_utc)
+        tracker.rollover_open_sessions(midnight_utc, tz)
 
-        tracked_name = str(self.config.tracked_voice_channel_id)
-        if self.tracked_voice_channel is not None:
-            tracked_name = self.tracked_voice_channel.name
+        tracked_name = str(config["tracked_voice_channel_id"])
+        if bot.tracked_voice_channel is not None:
+            tracked_name = bot.tracked_voice_channel.name
 
-        self.logger.info("Posting midnight report for %s", target_day)
+        bot.logger.info("Posting midnight report for %s", target_day)
 
         try:
-            await self.reporter.post_report(
-                self.guild_obj,
-                self.report_channel,
+            await reporter.post_report(
+                bot.guild_obj,
+                bot.report_channel,
                 tracked_name,
                 target_day,
+                tz,
                 include_live=False,
                 now_utc=midnight_utc,
             )
-        except Exception:  # pragma: no cover - runtime safety
-            self.logger.exception("Failed to post midnight report")
+        except Exception:
+            bot.logger.exception("Failed to post midnight report")
             return
 
-        self.db.set_meta(AUTO_REPORT_META_KEY, target_day)
+        db.set_meta(AUTO_REPORT_META_KEY, target_day)
 
     @midnight_report_loop.before_loop
-    async def before_midnight_report_loop(self) -> None:
-        await self.wait_until_ready()
+    async def before_midnight_report_loop():
+        await bot.wait_until_ready()
 
-    def cooldown_remaining_seconds(self, now_utc: datetime | None = None) -> int:
-        now = now_utc or utc_now()
-        last_manual = self.db.get_meta(MANUAL_REPORT_META_KEY)
-        return remaining_cooldown_seconds(
-            last_manual,
-            self.config.report_now_cooldown_seconds,
-            now,
-        )
+    # Store the loop on the bot so we can cancel it on close.
+    bot._midnight_loop = midnight_report_loop
 
-    def record_manual_report(self, now_utc: datetime | None = None) -> None:
-        # Persist global cooldown reference timestamp for /report-now.
-        now = (now_utc or utc_now()).astimezone(timezone.utc)
-        self.db.set_meta(MANUAL_REPORT_META_KEY, now.isoformat())
+    # Override close to clean up resources.
+    original_close = bot.close
 
-    async def close(self) -> None:
-        if self.midnight_report_loop.is_running():
-            self.midnight_report_loop.cancel()
-        self.db.close()
-        await super().close()
+    async def custom_close():
+        if midnight_report_loop.is_running():
+            midnight_report_loop.cancel()
+        db.close_db()
+        await original_close()
+
+    bot.close = custom_close
+
+    return bot
 
 
-def configure_logging() -> None:
+async def validate_runtime(bot, config):
+    """Verify guild, channels, and permissions are set up correctly."""
+    guild = bot.get_guild(config["guild_id"])
+    if guild is None:
+        bot.logger.error("Configured guild %s not found", config["guild_id"])
+        await bot.close()
+        return False
+
+    tracked = guild.get_channel(config["tracked_voice_channel_id"])
+    if not isinstance(tracked, discord.VoiceChannel):
+        bot.logger.error("Tracked channel %s is missing or not a voice channel", config["tracked_voice_channel_id"])
+        await bot.close()
+        return False
+
+    report = guild.get_channel(config["report_channel_id"])
+    if not isinstance(report, discord.TextChannel):
+        bot.logger.error("Report channel %s is missing or not a text channel", config["report_channel_id"])
+        await bot.close()
+        return False
+
+    me = guild.me
+    if me is None and bot.user is not None:
+        me = guild.get_member(bot.user.id)
+
+    if me is None:
+        bot.logger.error("Unable to resolve bot member in guild %s", guild.id)
+        await bot.close()
+        return False
+
+    perms = report.permissions_for(me)
+    if not perms.view_channel or not perms.send_messages:
+        bot.logger.error("Missing view/send permission in report channel %s", report.id)
+        await bot.close()
+        return False
+
+    bot.guild_obj = guild
+    bot.tracked_voice_channel = tracked
+    bot.report_channel = report
+
+    reseed_from_channel(bot, config)
+    return True
+
+
+def reseed_from_channel(bot, config):
+    """Reset open sessions based on who's currently in the tracked voice channel."""
+    if bot.tracked_voice_channel is None:
+        return
+
+    now = utc_now()
+    # Ignore bot accounts so only human members appear in tracked totals.
+    active_users = [str(member.id) for member in bot.tracked_voice_channel.members if not member.bot]
+    tracker.reseed_sessions(active_users, started_at_utc=now)
+    bot.logger.info("Reseeded open sessions for %d active users", len(active_users))
+
+
+def configure_logging():
+    """Set up basic logging format."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
 
-def main() -> None:
+def main():
+    """Entry point — load config, connect DB, create bot, and run."""
     load_dotenv()
     configure_logging()
 
     config = load_config()
-    db = Database(DEFAULT_DB_PATH)
-    db.initialize()
+    db.connect_db(DEFAULT_DB_PATH)
+    db.initialize_db()
 
-    bot = VoiceTrackerBot(config=config, db=db)
-    bot.run(config.discord_token)
+    bot = create_bot(config)
+    bot.run(config["discord_token"])
 
 
 if __name__ == "__main__":

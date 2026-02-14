@@ -1,22 +1,22 @@
-from __future__ import annotations
-
 import logging
 from datetime import date, datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo
 
-from .db import Database
+from . import db
 
 
-def utc_now() -> datetime:
+logger = logging.getLogger(__name__)
+
+
+def utc_now():
+    """Return the current time in UTC."""
     return datetime.now(timezone.utc)
 
 
-def split_interval_by_local_day(
-    start_utc: datetime,
-    end_utc: datetime,
-    tz: ZoneInfo,
-) -> list[tuple[str, int]]:
-    """Split a UTC interval into (local_day_iso, seconds) buckets."""
+def split_interval_by_local_day(start_utc, end_utc, tz):
+    """Split a UTC interval into (local_day_iso, seconds) buckets.
+
+    Returns a list of tuples like [("2026-01-01", 600), ("2026-01-02", 600)].
+    """
     if start_utc.tzinfo is None or end_utc.tzinfo is None:
         raise ValueError("start_utc and end_utc must be timezone-aware")
 
@@ -26,7 +26,7 @@ def split_interval_by_local_day(
     if end <= start:
         return []
 
-    segments: list[tuple[str, int]] = []
+    segments = []
     cursor = start
 
     while cursor < end:
@@ -47,87 +47,90 @@ def split_interval_by_local_day(
     return segments
 
 
-class VoiceTracker:
-    def __init__(self, db: Database, tz: ZoneInfo, logger: logging.Logger | None = None) -> None:
-        self.db = db
-        self.tz = tz
-        self.logger = logger or logging.getLogger(__name__)
+def start_session(user_id, tz, started_at_utc=None):
+    """Open a tracking session for a user. Returns True if started, False if already active."""
+    if db.get_open_session(user_id) is not None:
+        logger.debug("Ignoring duplicate start for user %s", user_id)
+        return False
 
-    def start_session(self, user_id: str, started_at_utc: datetime | None = None) -> bool:
-        # A user can only have one open session in the tracked voice channel.
-        if self.db.get_open_session(user_id) is not None:
-            self.logger.debug("Ignoring duplicate start for user %s", user_id)
-            return False
+    started = started_at_utc or utc_now()
+    db.set_open_session(user_id, started)
+    return True
 
-        started = started_at_utc or utc_now()
-        self.db.set_open_session(user_id, started)
-        return True
 
-    def end_session(self, user_id: str, ended_at_utc: datetime | None = None) -> int:
-        session = self.db.get_open_session(user_id)
-        if session is None:
-            self.logger.debug("Ignoring stop for missing session user=%s", user_id)
-            return 0
+def end_session(user_id, tz, ended_at_utc=None):
+    """Close a tracking session and persist the tracked seconds. Returns total seconds tracked."""
+    session = db.get_open_session(user_id)
+    if session is None:
+        logger.debug("Ignoring stop for missing session user=%s", user_id)
+        return 0
 
-        ended = ended_at_utc or utc_now()
-        tracked = self.accumulate_interval(user_id, session.started_at_utc, ended)
-        self.db.delete_open_session(user_id)
-        return tracked
+    ended = ended_at_utc or utc_now()
+    tracked = accumulate_interval(user_id, session["started_at_utc"], ended, tz)
+    db.delete_open_session(user_id)
+    return tracked
 
-    def accumulate_interval(self, user_id: str, start_utc: datetime, end_utc: datetime) -> int:
-        # Persist each per-day chunk so cross-midnight sessions are attributed correctly.
-        total_seconds = 0
-        for day_key, seconds in split_interval_by_local_day(start_utc, end_utc, self.tz):
-            self.db.add_daily_seconds(day_key, user_id, seconds)
-            total_seconds += seconds
-        return total_seconds
 
-    def rollover_open_sessions(self, midnight_utc: datetime) -> None:
-        # At local midnight, close yesterday's portion and reopen at exactly midnight.
-        for session in self.db.list_open_sessions():
-            if session.started_at_utc >= midnight_utc:
-                continue
-            self.accumulate_interval(session.user_id, session.started_at_utc, midnight_utc)
-            self.db.set_open_session(session.user_id, midnight_utc)
+def accumulate_interval(user_id, start_utc, end_utc, tz):
+    """Split an interval across local days and persist each chunk. Returns total seconds."""
+    total_seconds = 0
+    for day_key, seconds in split_interval_by_local_day(start_utc, end_utc, tz):
+        db.add_daily_seconds(day_key, user_id, seconds)
+        total_seconds += seconds
+    return total_seconds
 
-    def reseed_sessions(self, user_ids: list[str], started_at_utc: datetime | None = None) -> None:
-        # On startup we intentionally reset open sessions to "now" to avoid counting downtime.
-        started = started_at_utc or utc_now()
-        self.db.clear_open_sessions()
-        for user_id in user_ids:
-            self.db.set_open_session(user_id, started)
 
-    def get_totals_for_day(
-        self,
-        day_local: str,
-        *,
-        include_live: bool,
-        now_utc: datetime | None = None,
-    ) -> dict[str, int]:
-        totals = {item.user_id: item.seconds for item in self.db.get_daily_totals(day_local)}
+def rollover_open_sessions(midnight_utc, tz):
+    """At local midnight, close yesterday's portion and reopen at exactly midnight."""
+    for session in db.list_open_sessions():
+        if session["started_at_utc"] >= midnight_utc:
+            continue
+        accumulate_interval(session["user_id"], session["started_at_utc"], midnight_utc, tz)
+        db.set_open_session(session["user_id"], midnight_utc)
 
-        if not include_live:
-            return totals
 
-        now = now_utc or utc_now()
-        for session in self.db.list_open_sessions():
-            # Include in-flight time for commands like /today without ending active sessions.
-            for segment_day, seconds in split_interval_by_local_day(session.started_at_utc, now, self.tz):
-                if segment_day != day_local:
-                    continue
-                totals[session.user_id] = totals.get(session.user_id, 0) + seconds
+def reseed_sessions(user_ids, started_at_utc=None):
+    """On startup, reset open sessions to 'now' to avoid counting downtime."""
+    started = started_at_utc or utc_now()
+    db.clear_open_sessions()
+    for user_id in user_ids:
+        db.set_open_session(user_id, started)
 
+
+def get_totals_for_day(day_local, tz, include_live=False, now_utc=None):
+    """Get a dict of {user_id: seconds} for a given local day.
+
+    If include_live is True, adds in-progress session time on top of persisted totals.
+    """
+    totals = {item["user_id"]: item["seconds"] for item in db.get_daily_totals(day_local)}
+
+    if not include_live:
         return totals
 
-    def local_day_key(self, dt_utc: datetime | None = None) -> str:
-        current = dt_utc or utc_now()
-        return current.astimezone(self.tz).date().isoformat()
+    now = now_utc or utc_now()
+    for session in db.list_open_sessions():
+        for segment_day, seconds in split_interval_by_local_day(session["started_at_utc"], now, tz):
+            if segment_day != day_local:
+                continue
+            totals[session["user_id"]] = totals.get(session["user_id"], 0) + seconds
 
-    def previous_local_day_key(self, dt_utc: datetime | None = None) -> str:
-        current = dt_utc or utc_now()
-        local_date = current.astimezone(self.tz).date() - timedelta(days=1)
-        return local_date.isoformat()
+    return totals
 
-    def midnight_utc_for_local_day(self, day_value: date) -> datetime:
-        midnight_local = datetime.combine(day_value, time.min, tzinfo=self.tz)
-        return midnight_local.astimezone(timezone.utc)
+
+def local_day_key(tz, dt_utc=None):
+    """Return today's date as an ISO string in the given timezone."""
+    current = dt_utc or utc_now()
+    return current.astimezone(tz).date().isoformat()
+
+
+def previous_local_day_key(tz, dt_utc=None):
+    """Return yesterday's date as an ISO string in the given timezone."""
+    current = dt_utc or utc_now()
+    local_date = current.astimezone(tz).date() - timedelta(days=1)
+    return local_date.isoformat()
+
+
+def midnight_utc_for_local_day(day_value, tz):
+    """Convert a local date's midnight to a UTC datetime."""
+    midnight_local = datetime.combine(day_value, time.min, tzinfo=tz)
+    return midnight_local.astimezone(timezone.utc)

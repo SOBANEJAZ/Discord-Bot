@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from src.cooldown import remaining_cooldown_seconds
 
 
-def test_remaining_cooldown_seconds() -> None:
+def test_remaining_cooldown_seconds():
     now = datetime(2026, 2, 1, 12, 0, 0, tzinfo=timezone.utc)
     last_run = datetime(2026, 2, 1, 11, 30, 0, tzinfo=timezone.utc).isoformat()
 
