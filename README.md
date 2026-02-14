@@ -10,7 +10,7 @@ A Discord bot that tracks time spent in one voice channel, stores daily totals, 
 - Commands:
   - `/status`
   - `/today`
-  - `/report-now` (global cooldown, default 1 hour)
+  - `/report-now`
 - Stores data in SQLite (`voice_tracker.db`)
 
 ## Requirements
@@ -41,7 +41,6 @@ python -m src.main
 - `TRACKED_VOICE_CHANNEL_ID`: channel to track
 - `REPORT_CHANNEL_ID`: channel where reports are posted
 - `TIMEZONE`: IANA timezone (for example `America/New_York`)
-- `REPORT_NOW_COOLDOWN_SECONDS`: manual report cooldown in seconds (default `3600`)
 
 ## systemd example
 

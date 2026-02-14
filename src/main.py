@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from . import db, reporter, tracker
 from .commands import register_commands
 from .config import load_config
-from .cooldown import remaining_cooldown_seconds
 from .tracker import utc_now
 
 AUTO_REPORT_META_KEY = "last_auto_report_day"

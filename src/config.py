@@ -37,22 +37,12 @@ def load_config():
 
     Returns a plain dict with keys:
         discord_token, guild_id, tracked_voice_channel_id,
-        report_channel_id, timezone, report_now_cooldown_seconds
+        report_channel_id, timezone
     """
-    cooldown_raw = os.getenv("REPORT_NOW_COOLDOWN_SECONDS", "3600").strip()
-    try:
-        cooldown = int(cooldown_raw)
-    except ValueError as exc:
-        raise ValueError("REPORT_NOW_COOLDOWN_SECONDS must be an integer") from exc
-
-    if cooldown <= 0:
-        raise ValueError("REPORT_NOW_COOLDOWN_SECONDS must be positive")
-
     return {
         "discord_token": _required_env("DISCORD_TOKEN"),
         "guild_id": _required_int_env("GUILD_ID"),
         "tracked_voice_channel_id": _required_int_env("TRACKED_VOICE_CHANNEL_ID"),
         "report_channel_id": _required_int_env("REPORT_CHANNEL_ID"),
         "timezone": _timezone_from_env("TIMEZONE"),
-        "report_now_cooldown_seconds": cooldown,
     }

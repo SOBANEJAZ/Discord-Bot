@@ -3,7 +3,6 @@ from datetime import datetime, time, timedelta, timezone
 import discord
 
 from . import db, reporter
-from .cooldown import remaining_cooldown_seconds
 from .reporter import format_seconds
 from .tracker import utc_now
 
@@ -15,17 +14,11 @@ def register_commands(bot):
     """Register all slash commands on the bot. Called once during setup."""
     guild_scope = discord.Object(id=bot.config["guild_id"])
 
-    @bot.tree.command(name="status", description="Show bot status and cooldown info", guild=guild_scope)
+    @bot.tree.command(name="status", description="Show bot status", guild=guild_scope)
     async def status(interaction):
         now = utc_now()
         now_local = now.astimezone(bot.config["timezone"])
         next_midnight_local = datetime.combine(now_local.date() + timedelta(days=1), time.min, tzinfo=bot.config["timezone"])
-
-        # Calculate cooldown inline instead of calling a method
-        last_manual = db.get_meta(MANUAL_REPORT_META_KEY)
-        cooldown_remaining = remaining_cooldown_seconds(
-            last_manual, bot.config["report_now_cooldown_seconds"], now
-        )
 
         lines = [
             "Voice tracker status: online",
@@ -35,7 +28,6 @@ def register_commands(bot):
             f"Timezone: `{bot.config['timezone'].key}`",
             f"Current local time: `{now_local.isoformat()}`",
             f"Next scheduled midnight check: `{next_midnight_local.isoformat()}`",
-            f"/report-now cooldown remaining: `{format_seconds(cooldown_remaining)}`",
         ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -73,18 +65,6 @@ def register_commands(bot):
         now = utc_now()
         tz = bot.config["timezone"]
 
-        # Calculate cooldown inline
-        last_manual = db.get_meta(MANUAL_REPORT_META_KEY)
-        cooldown_remaining = remaining_cooldown_seconds(
-            last_manual, bot.config["report_now_cooldown_seconds"], now
-        )
-        if cooldown_remaining > 0:
-            await interaction.response.send_message(
-                f"Global cooldown active. Try again in `{format_seconds(cooldown_remaining)}`.",
-                ephemeral=True,
-            )
-            return
-
         if bot.report_channel is None:
             await interaction.response.send_message("Report channel is not available.", ephemeral=True)
             return
@@ -109,10 +89,6 @@ def register_commands(bot):
             bot.logger.exception("/report-now failed")
             await interaction.response.send_message(f"Failed to send report: `{exc}`", ephemeral=True)
             return
-
-        # Record the manual report time for cooldown tracking
-        now_iso = now.astimezone(timezone.utc).isoformat()
-        db.set_meta(MANUAL_REPORT_META_KEY, now_iso)
 
         await interaction.response.send_message(
             f"Posted day-so-far report for `{day_local}` in <#{bot.config['report_channel_id']}>.",
